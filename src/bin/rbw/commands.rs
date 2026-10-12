@@ -2978,7 +2978,7 @@ fn encode_json(
                         ("container", false)
                     }
                     ("container", _) => ("container", true),
-                    ("fields", "value") => ("fields", true),
+                    ("fields", "name" | "value") => ("fields", true),
                     ("fields", _) => ("fields", false),
                     ("history", "password") => ("history", true),
                     ("history", _) => ("history", false),
@@ -3128,7 +3128,7 @@ mod test {
         assert_eq!(out["login"]["uris"][0]["match"], serde_json::Value::Null);
         assert_eq!(out["sshKey"]["publicKey"], "enc(ssh-ed25519 AAAA pub)");
         assert_eq!(out["sshKey"]["keyFingerprint"], "enc(SHA256:abc)");
-        assert_eq!(out["fields"][0]["name"], "label");
+        assert_eq!(out["fields"][0]["name"], "enc(label)");
         assert_eq!(out["fields"][0]["type"], 1);
     }
 
