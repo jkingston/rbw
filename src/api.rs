@@ -657,11 +657,18 @@ struct CipherIdentity {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct CipherSshKey {
-    #[serde(rename = "PrivateKey", alias = "privateKey")]
+    // The wire format is lowerCamelCase with `keyFingerprint`: servers that
+    // validate the ssh key payload (vaultwarden rejects and nulls the field
+    // otherwise) do not accept the PascalCase spellings on the way in.
+    #[serde(rename = "privateKey", alias = "PrivateKey")]
     private_key: Option<String>,
-    #[serde(rename = "PublicKey", alias = "publicKey")]
+    #[serde(rename = "publicKey", alias = "PublicKey")]
     public_key: Option<String>,
-    #[serde(rename = "Fingerprint", alias = "keyFingerprint")]
+    #[serde(
+        rename = "keyFingerprint",
+        alias = "Fingerprint",
+        alias = "fingerprint"
+    )]
     fingerprint: Option<String>,
 }
 
