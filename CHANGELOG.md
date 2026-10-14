@@ -11,6 +11,16 @@
   `rbw encode` (encrypt the secret fields of a cipher JSON body on stdin),
   `rbw create-raw` and `rbw edit-raw` (POST/PUT an already-encoded body).
 
+## Fixed
+
+* `rbw login` now always re-authenticates, even when the local database
+  already contains tokens. Previously it was a no-op whenever tokens were
+  present, so a session whose refresh token the server had stopped
+  accepting could not be recovered.
+* A refresh token rejected by the server now reports that the session has
+  expired and suggests `rbw login`, instead of failing with a confusing
+  JSON parse error from the error response body.
+
 ## [1.15.0] - 2025-12-31
 
 ## Added

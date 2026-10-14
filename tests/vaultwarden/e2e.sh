@@ -53,13 +53,17 @@ echo "=== creating account ==="
 python3 "$SRC/tests/vaultwarden/register.py" "$VW_URL" "$EMAIL" "$MASTER" |
     sed 's/^/  /'
 
-# scripted pinentry: answers GETPIN with the master password
+# scripted pinentry: answers GETPIN with the master password, and logs
+# every prompt so tests can tell whether the agent asked for a password
 cat >"$WORK/pinentry-scripted" <<EOF
 #!/usr/bin/env bash
 printf 'OK Pleased to meet you\n'
 while IFS= read -r line; do
     case "\$line" in
-        GETPIN*) printf 'D %s\nOK\n' '$MASTER' ;;
+        GETPIN*)
+            printf '%s\n' "\$line" >> '$WORK/pinentry.log'
+            printf 'D %s\nOK\n' '$MASTER'
+            ;;
         *) printf 'OK\n' ;;
     esac
 done
@@ -77,6 +81,18 @@ else
     "$RBW_BIN" sync 2>&1 | sed 's/^/    /' | head -10
     exit 1
 fi
+
+echo "=== forced re-login with a live session ==="
+# rbw login must re-authenticate (prompt for the password) even when the
+# db already holds tokens; it used to be a silent no-op
+: >"$WORK/pinentry.log"
+if "$RBW_BIN" login >/dev/null 2>&1 && [[ -s "$WORK/pinentry.log" ]]; then
+    ok "rbw login re-authenticates instead of no-op ack"
+else
+    bad "rbw login re-authenticates instead of no-op ack"
+fi
+"$RBW_BIN" sync >/dev/null 2>&1 &&
+    ok "sync works after forced login" || bad "sync works after forced login"
 
 echo "=== login item create/edit (line 1 = password, rest = notes) ==="
 if printf 'pw-one\n\nnote-body\n' |
@@ -166,6 +182,33 @@ if [[ "$HAS_RAW" == 1 ]]; then
         ok "edit-raw replaced password" || bad "edit-raw replaced password"
 else
     echo "=== encode/create-raw/edit-raw: skipped (commands absent) ==="
+fi
+
+echo "=== expired session recovery ==="
+# simulate an expired session the way the server leaves it: tokens present
+# in the db file but rejected on use. rbw sync must explain the failure
+# instead of leaking a serde error, and rbw login must be able to recover.
+"$RBW_BIN" stop-agent
+DB="$(find "$XDG_CACHE_HOME/rbw" -maxdepth 1 -name '*.json' -print -quit)"
+if [[ -f "$DB" ]] &&
+    jq '.access_token = "expired" | .refresh_token = "expired"' \
+        "$DB" >"$DB.tmp" && mv "$DB.tmp" "$DB"; then
+    out="$("$RBW_BIN" sync 2>&1)"
+    if [[ "$out" == *"rbw login"* && "$out" != *"missing field"* ]]; then
+        ok "sync with rejected tokens points at rbw login"
+    else
+        bad "sync with rejected tokens points at rbw login" "$out"
+    fi
+    : >"$WORK/pinentry.log"
+    if "$RBW_BIN" login >/dev/null 2>&1 && [[ -s "$WORK/pinentry.log" ]]; then
+        ok "rbw login recovers from a rejected refresh token"
+    else
+        bad "rbw login recovers from a rejected refresh token"
+    fi
+    "$RBW_BIN" sync >/dev/null 2>&1 &&
+        ok "sync works after re-login" || bad "sync works after re-login"
+else
+    bad "find rbw cache db to expire" "no db json under $XDG_CACHE_HOME/rbw"
 fi
 
 echo "=== list/search ==="

@@ -168,7 +168,9 @@ impl Environment {
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum Action {
-    Login,
+    Login {
+        force: bool,
+    },
     Register,
     Unlock,
     CheckLock,

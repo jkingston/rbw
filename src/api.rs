@@ -1644,8 +1644,19 @@ impl Client {
             .form(&connect_req)
             .send()
             .map_err(|source| Error::Reqwest { source })?;
-        let connect_res: ConnectRefreshTokenRes = res.json_with_path()?;
-        Ok(connect_res.access_token)
+        if res.status() == reqwest::StatusCode::OK {
+            let connect_res: ConnectRefreshTokenRes = res.json_with_path()?;
+            Ok(connect_res.access_token)
+        } else {
+            let code = res.status().as_u16();
+            match res.text() {
+                Ok(body) => Err(classify_refresh_token_error(&body, code)),
+                Err(e) => {
+                    log::warn!("failed to read response body: {e}");
+                    Err(Error::RequestFailed { status: code })
+                }
+            }
+        }
     }
 
     pub async fn exchange_refresh_token_async(
@@ -1664,9 +1675,20 @@ impl Client {
             .send()
             .await
             .map_err(|source| Error::Reqwest { source })?;
-        let connect_res: ConnectRefreshTokenRes =
-            res.json_with_path().await?;
-        Ok(connect_res.access_token)
+        if res.status() == reqwest::StatusCode::OK {
+            let connect_res: ConnectRefreshTokenRes =
+                res.json_with_path().await?;
+            Ok(connect_res.access_token)
+        } else {
+            let code = res.status().as_u16();
+            match res.text().await {
+                Ok(body) => Err(classify_refresh_token_error(&body, code)),
+                Err(e) => {
+                    log::warn!("failed to read response body: {e}");
+                    Err(Error::RequestFailed { status: code })
+                }
+            }
+        }
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -1852,4 +1874,28 @@ fn classify_login_error(error_res: &ConnectErrorRes, code: u16) -> Error {
 
     log::warn!("unexpected error received during login: {error_res:?}");
     Error::RequestFailed { status: code }
+}
+
+fn classify_refresh_token_error(body: &str, code: u16) -> Error {
+    match body.to_string().json_with_path::<ConnectErrorRes>() {
+        Ok(error_res) => {
+            if error_res.error == "invalid_grant" {
+                return Error::RefreshTokenRejected;
+            }
+            log::warn!(
+                "unexpected error received during refresh: {error_res:?}"
+            );
+        }
+        Err(e) => {
+            log::warn!("{e}: {body}");
+        }
+    }
+
+    // a 400/401 from the token endpoint with no recognizable error body
+    // still means the exchange was rejected, whatever the reason
+    if matches!(code, 400 | 401) {
+        Error::RefreshTokenRejected
+    } else {
+        Error::RequestFailed { status: code }
+    }
 }

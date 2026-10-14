@@ -1332,14 +1332,16 @@ pub fn register() -> anyhow::Result<()> {
 
 pub fn login() -> anyhow::Result<()> {
     ensure_agent()?;
-    crate::actions::login()?;
+    // an explicit `rbw login` always re-authenticates, even if a db with
+    // tokens exists: those tokens may be rejected by the server
+    crate::actions::login(true)?;
 
     Ok(())
 }
 
 pub fn unlock() -> anyhow::Result<()> {
     ensure_agent()?;
-    crate::actions::login()?;
+    crate::actions::login(false)?;
     crate::actions::unlock()?;
 
     Ok(())
@@ -1356,7 +1358,7 @@ pub fn unlocked() -> anyhow::Result<()> {
 
 pub fn sync() -> anyhow::Result<()> {
     ensure_agent()?;
-    crate::actions::login()?;
+    crate::actions::login(false)?;
     crate::actions::sync()?;
 
     Ok(())

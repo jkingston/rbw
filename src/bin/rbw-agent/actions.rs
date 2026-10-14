@@ -79,10 +79,14 @@ pub async fn login(
     sock: &mut crate::sock::Sock,
     state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
     environment: &rbw::protocol::Environment,
+    force: bool,
 ) -> anyhow::Result<()> {
     let db = load_db().await.unwrap_or_else(|_| rbw::db::Db::new());
 
-    if db.needs_login() {
+    // needs_login only checks that tokens are present, but present tokens
+    // may still be rejected by the server, so a forced login (an explicit
+    // `rbw login`) re-authenticates regardless
+    if force || db.needs_login() {
         let url_str = config_base_url().await?;
         let url = reqwest::Url::parse(&url_str)
             .context("failed to parse base url")?;
