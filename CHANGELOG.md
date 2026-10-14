@@ -20,6 +20,11 @@
 * A refresh token rejected by the server now reports that the session has
   expired and suggests `rbw login`, instead of failing with a confusing
   JSON parse error from the error response body.
+* Cipher create and update (`rbw add`, `rbw edit`, `rbw create-raw`,
+  `rbw edit-raw`) now send the `encryptedFor` field, the account uuid
+  taken from the access token. The vaultwarden 2026.6+ / web-2025.6+ API
+  requires it; previously these commands failed with HTTP 422 against
+  such servers.
 
 ## [1.15.0] - 2025-12-31
 

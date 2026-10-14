@@ -11,9 +11,9 @@
 # Usage: tests/vaultwarden/run.sh
 #
 # vaultwarden is pinned to 1.36.x: older releases drop the ssh key
-# payload on sync (the sshKey field comes back null), newer ones
-# (1.37+) require an `encryptedFor` field on cipher creation that rbw
-# does not send.
+# payload on sync (the sshKey field comes back null). Newer releases
+# (1.37+) additionally require an encryptedFor field on cipher writes;
+# rbw now sends it, and the suite is green against 1.37.4 as well.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

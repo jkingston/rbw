@@ -769,6 +769,13 @@ struct CiphersPostReq {
     secure_note: Option<CipherSecureNote>,
     #[serde(rename = "sshKey", skip_serializing_if = "Option::is_none")]
     ssh_key: Option<CipherSshKey>,
+    // the account uuid, required on cipher writes by the web-v2025.6 wire
+    // format (vaultwarden 2026.6+); see jwt_sub
+    #[serde(
+        rename = "encryptedFor",
+        skip_serializing_if = "Option::is_none"
+    )]
+    encrypted_for: Option<String>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -791,6 +798,13 @@ struct CiphersPutReq {
     ssh_key: Option<CipherSshKey>,
     #[serde(rename = "passwordHistory")]
     password_history: Vec<CiphersPutReqHistory>,
+    // the account uuid, required on cipher writes by the web-v2025.6 wire
+    // format (vaultwarden 2026.6+); see jwt_sub
+    #[serde(
+        rename = "encryptedFor",
+        skip_serializing_if = "Option::is_none"
+    )]
+    encrypted_for: Option<String>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -1223,6 +1237,7 @@ impl Client {
             identity: None,
             secure_note: None,
             ssh_key: None,
+            encrypted_for: jwt_sub(access_token),
         };
         match data {
             crate::db::EntryData::Login {
@@ -1388,6 +1403,7 @@ impl Client {
                     password: entry.password.clone(),
                 })
                 .collect(),
+            encrypted_for: jwt_sub(access_token),
         };
         match data {
             crate::db::EntryData::Login {
@@ -1524,17 +1540,20 @@ impl Client {
 
     // Escape hatch: post/put a caller-built (already-encrypted) cipher
     // request body verbatim, like `bw create|edit item` accepts encoded
-    // JSON. Field values must already be cipherstrings.
+    // JSON. Field values must already be cipherstrings. The body is sent
+    // as built except for the encryptedFor field, which is added when
+    // missing (see with_encrypted_for).
     pub fn create_raw(
         &self,
         access_token: &str,
         body: &serde_json::Value,
     ) -> Result<()> {
+        let body = with_encrypted_for(body, access_token);
         let client = reqwest::blocking::Client::new();
         let res = client
             .post(self.api_url("/ciphers"))
             .header("Authorization", format!("Bearer {access_token}"))
-            .json(body)
+            .json(&body)
             .send()
             .map_err(|source| Error::Reqwest { source })?;
         match res.status() {
@@ -1554,11 +1573,12 @@ impl Client {
         id: &str,
         body: &serde_json::Value,
     ) -> Result<()> {
+        let body = with_encrypted_for(body, access_token);
         let client = reqwest::blocking::Client::new();
         let res = client
             .put(self.api_url(&format!("/ciphers/{id}")))
             .header("Authorization", format!("Bearer {access_token}"))
-            .json(body)
+            .json(&body)
             .send()
             .map_err(|source| Error::Reqwest { source })?;
         match res.status() {
@@ -1897,5 +1917,114 @@ fn classify_refresh_token_error(body: &str, code: u16) -> Error {
         Error::RefreshTokenRejected
     } else {
         Error::RequestFailed { status: code }
+    }
+}
+
+// The account uuid from the access token's `sub` claim, sent as the
+// `encryptedFor` field on cipher create/update: required since the
+// web-v2025.6 wire format (vaultwarden 2026.6+), which answers requests
+// without it with a 422 deserialization error. The claim needs no extra
+// request; the token is already in hand. Anything that is not a JWT
+// with a string sub yields None, and the field is simply omitted.
+fn jwt_sub(access_token: &str) -> Option<String> {
+    let mut payload = access_token.split('.').nth(1)?.to_string();
+    // JWT segments are base64url, padded or unpadded; restore the padding
+    while payload.len() % 4 != 0 {
+        payload.push('=');
+    }
+    let decoded = crate::base64::decode_url_safe(&payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    Some(claims.get("sub")?.as_str()?.to_string())
+}
+
+// Caller-built bodies for the create-raw/edit-raw escape hatch: add
+// encryptedFor when the body lacks it; an explicit value in the body
+// wins, and without a sub in the token the body is sent unchanged.
+fn with_encrypted_for(
+    body: &serde_json::Value,
+    access_token: &str,
+) -> serde_json::Value {
+    let mut body = body.clone();
+    if let Some(sub) = jwt_sub(access_token) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.entry("encryptedFor")
+                .or_insert_with(|| serde_json::Value::String(sub));
+        }
+    }
+    body
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    // an unsigned JWT: rbw reads the payload without checking the
+    // signature, so a placeholder signature segment is enough here
+    fn fake_jwt(payload: &str, pad: bool) -> String {
+        let mut payload = crate::base64::encode_url_safe_no_pad(payload);
+        if pad {
+            while payload.len() % 4 != 0 {
+                payload.push('=');
+            }
+        }
+        let header =
+            crate::base64::encode_url_safe_no_pad(br#"{"alg":"none"}"#);
+        format!("{header}.{payload}.signature")
+    }
+
+    // realistic vaultwarden claims; not a multiple of 3 bytes, so the
+    // base64url form needs padding
+    const CLAIMS: &str = r#"{"sub":"9f4c6e2a-1b3d-4f5a-8c7e-2d4f6a8b0c1e","name":"vault-test@example.com","scope":"api offline_access","client_id":"cli","amr":["pwd"]}"#;
+    const SUB: &str = "9f4c6e2a-1b3d-4f5a-8c7e-2d4f6a8b0c1e";
+
+    #[test]
+    fn test_jwt_sub() {
+        assert_eq!(jwt_sub(&fake_jwt(CLAIMS, false)).as_deref(), Some(SUB));
+        assert_eq!(jwt_sub(&fake_jwt(CLAIMS, true)).as_deref(), Some(SUB));
+    }
+
+    #[test]
+    fn test_jwt_sub_garbage() {
+        use base64::Engine as _;
+
+        // not a JWT at all, too many segments, and a payload that is
+        // valid base64url but not JSON
+        assert_eq!(jwt_sub(""), None);
+        assert_eq!(jwt_sub("not-a-token"), None);
+        assert_eq!(jwt_sub("only.two.segments.extra"), None);
+        let header =
+            crate::base64::encode_url_safe_no_pad(br#"{"alg":"none"}"#);
+        let not_json =
+            base64::engine::general_purpose::URL_SAFE.encode(b"not json");
+        assert_eq!(jwt_sub(&format!("{header}.{not_json}.")), None);
+        // a payload without a sub, or with a sub that is not a string
+        assert_eq!(jwt_sub(&fake_jwt(r#"{"name":"x@y.z"}"#, false)), None);
+        assert_eq!(jwt_sub(&fake_jwt(r#"{"sub":42}"#, false)), None);
+    }
+
+    #[test]
+    fn test_with_encrypted_for() {
+        let token = fake_jwt(CLAIMS, false);
+        let body = serde_json::json!({"type": 1, "name": "2.cGxhaW4="});
+
+        let out = with_encrypted_for(&body, &token);
+        assert_eq!(out["encryptedFor"], serde_json::json!(SUB));
+        // the rest of the body is untouched
+        assert_eq!(out["type"], body["type"]);
+        assert_eq!(out["name"], body["name"]);
+
+        // an explicit value in the body wins
+        let body =
+            serde_json::json!({"type": 1, "encryptedFor": "explicit-uuid"});
+        let out = with_encrypted_for(&body, &token);
+        assert_eq!(out["encryptedFor"], serde_json::json!("explicit-uuid"));
+
+        // without a usable token the body is unchanged
+        let body = serde_json::json!({"type": 1});
+        assert_eq!(with_encrypted_for(&body, "garbage"), body);
+
+        // a body that is not an object cannot carry the field
+        let body = serde_json::json!([1, 2, 3]);
+        assert_eq!(with_encrypted_for(&body, &token), body);
     }
 }
