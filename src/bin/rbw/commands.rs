@@ -99,7 +99,7 @@ impl std::str::FromStr for Field {
             "username" | "user" => Self::Username,
             "password" => Self::Password,
             "totp" | "code" => Self::Totp,
-            "uris" | "urls" | "sites" => Self::Uris,
+            "uris" | "urls" | "url" | "sites" => Self::Uris,
             "identityname" => Self::IdentityName,
             "city" => Self::City,
             "state" => Self::State,
@@ -415,6 +415,7 @@ impl DecryptedCipher {
     fn display_field(&self, desc: &str, field: &str, clipboard: bool) {
         let field = field.to_lowercase();
         let field = field.as_str();
+        FIELD_DISPLAYED.with(|flag| flag.set(false));
         match &self.data {
             DecryptedData::Login {
                 username,
@@ -689,6 +690,9 @@ impl DecryptedCipher {
                     }
                 }
             },
+        }
+        if !FIELD_DISPLAYED.with(std::cell::Cell::get) {
+            eprintln!("entry for '{desc}' had no field '{field}'");
         }
     }
 
@@ -1007,7 +1011,15 @@ impl DecryptedCipher {
     }
 }
 
+thread_local! {
+    // Set by val_display_or_store whenever a leaf value is reached, so
+    // display_field can tell "field absent" from "field present but empty".
+    static FIELD_DISPLAYED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 fn val_display_or_store(clipboard: bool, password: &str) -> bool {
+    FIELD_DISPLAYED.with(|flag| flag.set(true));
     if clipboard {
         match clipboard_store(password) {
             Ok(()) => true,
@@ -3132,6 +3144,18 @@ mod test {
         assert_eq!(out["sshKey"]["keyFingerprint"], "enc(SHA256:abc)");
         assert_eq!(out["fields"][0]["name"], "enc(label)");
         assert_eq!(out["fields"][0]["type"], 1);
+    }
+
+    #[test]
+    fn test_field_url_aliases() {
+        // "url" is how the field is named in prose and -f examples; it must
+        // resolve to the login URIs field instead of falling through to a
+        // custom-field search that silently matches nothing.
+        assert_eq!("url".parse::<Field>().unwrap(), Field::Uris);
+        assert_eq!("uris".parse::<Field>().unwrap(), Field::Uris);
+        assert_eq!("urls".parse::<Field>().unwrap(), Field::Uris);
+        assert_eq!("sites".parse::<Field>().unwrap(), Field::Uris);
+        assert!("ur".parse::<Field>().is_err());
     }
 
     #[test]
