@@ -24,6 +24,30 @@ password through stdin, writes to a private temporary file, and independently
 decrypts the export with `bitwarden-vault-backup-verify.js` before publishing it.
 The password is not placed in command arguments or environment variables.
 
+On macOS, `rbw export --password-stdin --cache-key` validates the master
+password and caches a dedicated export key in the local, non-synchronizing
+Keychain. The cache contains the PBKDF2-derived encryption/authentication
+keys and export salt, never the master password or vault keys.
+`rbw export --keychain` then fetches a fresh sync response and asks the
+already-unlocked agent to decrypt and re-encrypt it directly into the
+password-protected backup format. It never unlocks the agent or displays
+Keychain UI. Missing/inaccessible/stale cache or a locked agent exits 75;
+the Mac backup job prompts once to initialize or refresh the cache.
+
+The cached key is scoped to server/account and bound to the server's current
+protected vault key. A password change or key rotation invalidates the
+cache. Enrollment is authenticated by a domain-separated MAC under the
+vault key; the agent rejects forged cache records and never releases vault
+keys or plaintext export contents over this backup operation.
+Cached exports reuse that key and salt with fresh random IVs on every
+export, so they remain recoverable using the master password that initialized
+the cache on another machine, without this Mac or its Keychain.
+
+`rbw verify-export --keychain --verifier ~/bin/bitwarden-vault-backup-verify.js FILE`
+passes the export key over a private stdin pipe to the independent Node
+verifier. The key is never written to a file or command arguments.
+The ordinary password-based verifier still works for recovery checks.
+
 Install this fork with `cargo install --path . --locked --force --root ~/.local`.
 On macOS, `DEVELOPER_DIR=/Library/Developer/CommandLineTools` selects the
 standalone Command Line Tools. Both `rbw` and `rbw-agent` must come from the

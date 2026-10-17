@@ -48,6 +48,27 @@ pub fn sync() -> anyhow::Result<()> {
     simple_action(rbw::protocol::Action::Sync)
 }
 
+pub fn backup_export(
+    sync: serde_json::Value,
+    cache: serde_json::Value,
+    org_id: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut sock = connect()?;
+    sock.send(&rbw::protocol::Request::new(
+        get_environment(),
+        rbw::protocol::Action::BackupExport {
+            sync,
+            cache,
+            org_id: org_id.map(str::to_string),
+        },
+    ))?;
+    match sock.recv()? {
+        rbw::protocol::Response::BackupExport { encrypted } => Ok(encrypted),
+        rbw::protocol::Response::Error { error } => anyhow::bail!("{error}"),
+        other => anyhow::bail!("unexpected backup response: {other:?}"),
+    }
+}
+
 pub fn lock() -> anyhow::Result<()> {
     simple_action(rbw::protocol::Action::Lock)
 }

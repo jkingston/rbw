@@ -15,6 +15,7 @@ pub const VERSION: u32 = {
     unwrap(&u32::from_str_radix(major, 10)) * 1_000_000
         + unwrap(&u32::from_str_radix(minor, 10)) * 1_000_000
         + unwrap(&u32::from_str_radix(patch, 10)) * 1_000_000
+        + 1 // Fork protocol: encrypted backup export without exposing vault keys.
 };
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -176,6 +177,11 @@ pub enum Action {
     CheckLock,
     Lock,
     Sync,
+    BackupExport {
+        sync: serde_json::Value,
+        cache: serde_json::Value,
+        org_id: Option<String>,
+    },
     Decrypt {
         cipherstring: String,
         entry_key: Option<String>,
@@ -200,4 +206,5 @@ pub enum Response {
     Decrypt { plaintext: String },
     Encrypt { cipherstring: String },
     Version { version: u32 },
+    BackupExport { encrypted: serde_json::Value },
 }

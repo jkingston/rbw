@@ -58,15 +58,23 @@ enum Opt {
     Status,
 
     #[command(
-        about = "Export a password-protected Bitwarden encrypted JSON backup"
+        about = "Export a password-protected Bitwarden encrypted JSON backup",
+        group = clap::ArgGroup::new("export-key-source").args(["password_stdin", "keychain"]).required(true)
     )]
     Export {
+        #[arg(long, help = "Read the master password from stdin")]
+        password_stdin: bool,
         #[arg(
             long,
-            required = true,
-            help = "Read the master password from stdin"
+            help = "Use the macOS Keychain backup key while rbw is unlocked"
         )]
-        password_stdin: bool,
+        keychain: bool,
+        #[arg(
+            long,
+            requires = "password_stdin",
+            help = "Cache a dedicated export key in macOS Keychain"
+        )]
+        cache_key: bool,
         #[arg(
             long,
             help = "Export this organization's accessible items instead of personal items"
@@ -76,6 +84,17 @@ enum Opt {
         expected_user_id: Option<String>,
         #[arg(long, help = "Abort if the configured server URL differs")]
         expected_server_url: Option<String>,
+    },
+
+    #[command(
+        about = "Independently verify a backup using the cached export key"
+    )]
+    VerifyExport {
+        #[arg(long, required = true)]
+        keychain: bool,
+        #[arg(long)]
+        verifier: std::path::PathBuf,
+        file: std::path::PathBuf,
     },
 
     #[command(
@@ -329,6 +348,7 @@ impl Opt {
             Self::Sync => "sync".to_string(),
             Self::Status => "status".to_string(),
             Self::Export { .. } => "export".to_string(),
+            Self::VerifyExport { .. } => "verify-export".to_string(),
             Self::List { .. } => "list".to_string(),
             Self::Get { .. } => "get".to_string(),
             Self::Search { .. } => "search".to_string(),
@@ -425,11 +445,20 @@ fn main() {
             organizationid,
             expected_user_id,
             expected_server_url,
+            keychain,
+            cache_key,
         } => backup::export(
             organizationid.as_deref(),
             expected_user_id.as_deref(),
             expected_server_url.as_deref(),
+            keychain,
+            cache_key,
         ),
+        Opt::VerifyExport {
+            keychain: _,
+            verifier,
+            file,
+        } => backup::verify_export(&file, &verifier),
         Opt::List { fields, raw } => commands::list(&fields, raw),
         Opt::Get {
             find_args,
@@ -631,6 +660,10 @@ fn main() {
 
     if let Err(e) = res {
         eprintln!("{e:#}");
-        std::process::exit(1);
+        std::process::exit(if e.is::<backup::CacheUnavailable>() {
+            75
+        } else {
+            1
+        });
     }
 }

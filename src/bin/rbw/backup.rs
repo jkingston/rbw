@@ -53,139 +53,99 @@ pub fn status() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn export_keys(password: &[u8], salt: &str) -> anyhow::Result<Keys> {
-    let mut material = Zeroizing::new([0_u8; 32]);
-    pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(
-        password,
-        salt.as_bytes(),
-        600_000,
-        &mut *material,
-    )?;
-    let hkdf = hkdf::Hkdf::<sha2::Sha256>::from_prk(&*material)
-        .map_err(|_| anyhow::anyhow!("invalid export key"))?;
-    let mut bytes = rbw::locked::Vec::new();
-    bytes.extend(std::iter::repeat_n(0, 64));
-    hkdf.expand(b"enc", &mut bytes.data_mut()[..32])
-        .map_err(|_| anyhow::anyhow!("invalid export encryption key"))?;
-    hkdf.expand(b"mac", &mut bytes.data_mut()[32..])
-        .map_err(|_| anyhow::anyhow!("invalid export authentication key"))?;
-    Ok(Keys::new(bytes))
+use rbw::backup::*;
+
+#[derive(Debug, thiserror::Error)]
+#[error("backup key cache unavailable: {0}")]
+pub struct CacheUnavailable(pub String);
+
+fn cache_unavailable(error: impl std::fmt::Display) -> anyhow::Error {
+    CacheUnavailable(error.to_string()).into()
 }
 
-fn decrypt_bytes(value: &str, keys: &Keys) -> anyhow::Result<Vec<u8>> {
-    Ok(CipherString::new(value)?.decrypt_symmetric(keys, None)?)
-}
-
-// Work from raw sync JSON so passkeys and newly added cipher fields survive.
-// Decrypt only cipherstrings, never recurse into their decrypted contents.
-fn decrypt_tree(value: &mut Value, keys: &Keys) -> anyhow::Result<()> {
-    match value {
-        Value::String(s) if s.starts_with("2.") && s.contains('|') => {
-            let bytes = decrypt_bytes(s, keys)?;
-            *s = String::from_utf8(bytes.clone())
-                .unwrap_or_else(|_| rbw::base64::encode(bytes));
-        }
-        Value::Array(values) => {
-            for value in values {
-                decrypt_tree(value, keys)?;
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                decrypt_tree(value, keys)?;
-            }
-        }
-        _ => {}
+fn fresh_sync(
+    config: &rbw::config::Config,
+    db: &mut rbw::db::Db,
+) -> anyhow::Result<Value> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (token, sync) = runtime.block_on(rbw::actions::sync_raw(
+        db.access_token.as_deref().context("run rbw login first")?,
+        db.refresh_token.as_deref().context("run rbw login first")?,
+    ))?;
+    if let Some(token) = token {
+        db.access_token = Some(token);
+        db.save(
+            &config.server_name(),
+            config.email.as_deref().context("missing email")?,
+        )?;
     }
+    if required_str(&sync["profile"], "id")? != account_id(db)? {
+        bail!("account changed during export; retry after rbw login");
+    }
+    Ok(sync)
+}
+
+fn cached_export(
+    config: &rbw::config::Config,
+    db: &mut rbw::db::Db,
+    org_id: Option<&str>,
+) -> anyhow::Result<()> {
+    crate::actions::unlocked().map_err(cache_unavailable)?;
+    let server = server_url(config);
+    let user_id = account_id(db)?;
+    let record = rbw::backup_cache::load(&server, &user_id)
+        .map_err(cache_unavailable)?;
+    let sync = fresh_sync(config, db)?;
+    record
+        .validate(&server, &user_id, required_str(&sync["profile"], "key")?)
+        .map_err(cache_unavailable)?;
+    let encrypted = crate::actions::backup_export(
+        sync,
+        serde_json::to_value(&record)?,
+        org_id,
+    )?;
+    serde_json::to_writer(std::io::stdout(), &encrypted)?;
+    println!();
     Ok(())
 }
 
-fn required_str<'a>(
-    value: &'a Value,
-    field: &str,
-) -> anyhow::Result<&'a str> {
-    value[field]
-        .as_str()
-        .with_context(|| format!("sync response missing {field}"))
-}
-
-fn vault_payload(
-    sync: &Value,
-    keys: &Keys,
-    org_id: Option<&str>,
-) -> anyhow::Result<Value> {
-    let mut items = Vec::new();
-    for cipher in sync["ciphers"]
-        .as_array()
-        .context("sync response missing ciphers")?
-    {
-        if cipher["organizationId"].as_str() != org_id {
-            continue;
-        }
-        let mut item = cipher.clone();
-        let item_key = item
-            .get("key")
-            .and_then(Value::as_str)
-            .map(|key| -> anyhow::Result<Keys> {
-                Ok(Keys::new(
-                    CipherString::new(key)?.decrypt_locked_symmetric(keys)?,
-                ))
-            })
-            .transpose()?;
-        item.as_object_mut()
-            .context("invalid cipher")?
-            .remove("key");
-        decrypt_tree(&mut item, item_key.as_ref().unwrap_or(keys))
-            .with_context(|| {
-                format!("could not decrypt item {}", cipher["id"])
-            })?;
-        items.push(item);
+pub fn verify_export(
+    file: &std::path::Path,
+    verifier: &std::path::Path,
+) -> anyhow::Result<()> {
+    crate::actions::unlocked().map_err(cache_unavailable)?;
+    let config = rbw::config::Config::load()?;
+    let email = config.email.as_deref().context("run rbw login first")?;
+    let db = rbw::db::Db::load(&config.server_name(), email)?;
+    let user_id = account_id(&db)?;
+    let record = rbw::backup_cache::load(&server_url(&config), &user_id)
+        .map_err(cache_unavailable)?;
+    record.validate_identity(&server_url(&config), &user_id)?;
+    let input =
+        Zeroizing::new(serde_json::to_vec(&record.verifier_input()?)?);
+    let mut child = std::process::Command::new("node")
+        .arg(verifier)
+        .arg("--key-json")
+        .arg(file)
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .context("missing verifier stdin")?
+        .write_all(&input)?;
+    if !child.wait()?.success() {
+        bail!("independent backup verification failed");
     }
-    let mut folders = if org_id.is_none() {
-        sync["folders"]
-            .as_array()
-            .context("sync response missing folders")?
-            .clone()
-    } else {
-        Vec::new()
-    };
-    for folder in &mut folders {
-        decrypt_tree(folder, keys)?;
-    }
-    let mut collections = Vec::new();
-    if let Some(org_id) = org_id {
-        for collection in sync["collections"]
-            .as_array()
-            .context("sync response missing collections")?
-        {
-            if collection["organizationId"].as_str() == Some(org_id) {
-                let mut collection = collection.clone();
-                decrypt_tree(&mut collection, keys)?;
-                collections.push(collection);
-            }
-        }
-    }
-    Ok(
-        json!({ "encrypted": false, "folders": folders, "collections": collections, "items": items }),
-    )
-}
-
-fn protect(payload: &Value, password: &[u8]) -> anyhow::Result<Value> {
-    let salt = uuid::Uuid::new_v4().to_string();
-    let keys = export_keys(password, &salt)?;
-    let clear = Zeroizing::new(serde_json::to_vec(payload)?);
-    Ok(json!({
-        "encrypted": true, "passwordProtected": true,
-        "salt": salt, "kdfType": 0, "kdfIterations": 600_000,
-        "encKeyValidation_DO_NOT_EDIT": CipherString::encrypt_symmetric(&keys, uuid::Uuid::new_v4().to_string().as_bytes())?.to_string(),
-        "data": CipherString::encrypt_symmetric(&keys, &clear)?.to_string(),
-    }))
+    Ok(())
 }
 
 pub fn export(
     org_id: Option<&str>,
     expected_user_id: Option<&str>,
     expected_server_url: Option<&str>,
+    keychain: bool,
+    cache_key: bool,
 ) -> anyhow::Result<()> {
     let config = rbw::config::Config::load()?;
     let email = config.email.as_deref().context("run rbw login first")?;
@@ -195,6 +155,9 @@ pub fn export(
         || expected_server_url.is_some_and(|url| url != server_url(&config))
     {
         bail!("configured account changed since the backup prompt; retry");
+    }
+    if keychain {
+        return cached_export(&config, &mut db, org_id);
     }
     let mut password = Zeroizing::new(String::new());
     std::io::stdin().lock().read_line(&mut password)?;
@@ -224,18 +187,7 @@ pub fn export(
     .decrypt_locked_symmetric(&identity.keys)
     .context("master password is incorrect")?;
 
-    let runtime = tokio::runtime::Runtime::new()?;
-    let (token, sync) = runtime.block_on(rbw::actions::sync_raw(
-        db.access_token.as_deref().context("run rbw login first")?,
-        db.refresh_token.as_deref().context("run rbw login first")?,
-    ))?;
-    if let Some(token) = token {
-        db.access_token = Some(token);
-        db.save(&config.server_name(), email)?;
-    }
-    if required_str(&sync["profile"], "id")? != user_id {
-        bail!("account changed during export; retry after rbw login");
-    }
+    let sync = fresh_sync(&config, &mut db)?;
     let personal_keys = Keys::new(
         CipherString::new(required_str(&sync["profile"], "key")?)?
             .decrypt_locked_symmetric(&identity.keys)?,
@@ -263,7 +215,21 @@ pub fn export(
         org_keys.as_ref().unwrap_or(&personal_keys),
         org_id,
     )?;
-    let encrypted = protect(&payload, password.as_bytes())?;
+    let encrypted = if cache_key {
+        let record = rbw::backup_cache::CachedKey::new(
+            password.as_bytes(),
+            &server_url(&config),
+            &user_id,
+            required_str(&sync["profile"], "key")?,
+            &personal_keys,
+        )?;
+        let encrypted =
+            protect_with_keys(&payload, &record.salt, &record.keys()?)?;
+        rbw::backup_cache::save(&record)?;
+        encrypted
+    } else {
+        protect(&payload, password.as_bytes())?
+    };
     let mut output = std::io::stdout().lock();
     serde_json::to_writer(&mut output, &encrypted)?;
     writeln!(output)?;
@@ -378,6 +344,63 @@ mod tests {
                 assert_eq!(summary["sshKeys"], 1);
                 assert_eq!(summary["decryptable"], true);
             }
+        }
+    }
+
+    #[test]
+    fn independent_cached_key_verifier_and_master_recovery() {
+        let Ok(helper) = std::env::var("RBW_EXPORT_VERIFY_HELPER") else {
+            return;
+        };
+        let record = rbw::backup_cache::CachedKey::new(
+            b"fixture master",
+            "server",
+            "user",
+            "protected",
+            &keys(),
+        )
+        .unwrap();
+        let payload = json!({"items":[{"type":5,"sshKey":{"privateKey":"secret"}}],"folders":[]});
+        let encrypted = protect_with_keys(
+            &payload,
+            &record.salt,
+            &record.keys().unwrap(),
+        )
+        .unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        serde_json::to_writer(&mut file, &encrypted).unwrap();
+        let good = record.verifier_input().unwrap();
+        let mut wrong_salt = good.clone();
+        wrong_salt["salt"] = json!("wrong");
+        let mut wrong_key = good.clone();
+        wrong_key["encryptionKey"] = json!(rbw::base64::encode([0_u8; 32]));
+        for (input, mode, expected) in [
+            (serde_json::to_vec(&good).unwrap(), "--key-json", true),
+            (
+                serde_json::to_vec(&wrong_salt).unwrap(),
+                "--key-json",
+                false,
+            ),
+            (serde_json::to_vec(&wrong_key).unwrap(), "--key-json", false),
+            (b"fixture master\n".to_vec(), "--json", true),
+        ] {
+            let mut child = std::process::Command::new("node")
+                .arg(&helper)
+                .arg(mode)
+                .arg(file.path())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&input).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(
+                output.status.success(),
+                expected,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 }

@@ -144,6 +144,21 @@ async fn handle_request(
             crate::actions::sync(Some(sock), state.clone()).await?;
             false
         }
+        rbw::protocol::Action::BackupExport {
+            sync,
+            cache,
+            org_id,
+        } => {
+            crate::actions::backup_export(
+                sock,
+                state.clone(),
+                sync,
+                cache,
+                org_id.as_deref(),
+            )
+            .await?;
+            true
+        }
         rbw::protocol::Action::Decrypt {
             cipherstring,
             entry_key,

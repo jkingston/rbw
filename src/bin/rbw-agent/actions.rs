@@ -692,6 +692,49 @@ pub async fn decrypt(
     Ok(())
 }
 
+pub async fn backup_export(
+    sock: &mut crate::sock::Sock,
+    state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
+    sync: &serde_json::Value,
+    cache: &serde_json::Value,
+    org_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let state = state.lock().await;
+    if state.needs_unlock() {
+        anyhow::bail!("agent is locked");
+    }
+    let config = rbw::config::Config::load()?;
+    let server = config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://bitwarden.com")
+        .trim_end_matches('/');
+    let record: rbw::backup_cache::CachedKey =
+        serde_json::from_value(cache.clone())?;
+    record.validate(
+        server,
+        rbw::backup::required_str(&sync["profile"], "id")?,
+        rbw::backup::required_str(&sync["profile"], "key")?,
+    )?;
+    record.authorize(
+        state
+            .key(None)
+            .context("agent has no personal vault keys")?,
+    )?;
+    let keys = state
+        .key(org_id)
+        .context("agent has no keys for this vault")?;
+    let payload = rbw::backup::vault_payload(sync, keys, org_id)?;
+    let encrypted = rbw::backup::protect_with_keys(
+        &payload,
+        &record.salt,
+        &record.keys()?,
+    )?;
+    sock.send(&rbw::protocol::Response::BackupExport { encrypted })
+        .await?;
+    Ok(())
+}
+
 pub async fn encrypt(
     sock: &mut crate::sock::Sock,
     state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
