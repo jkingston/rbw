@@ -172,22 +172,30 @@ pub fn export(
     }
     let mut locked_password = rbw::locked::Vec::new();
     locked_password.extend(password.as_bytes().iter().copied());
+    // Validate against the current server wrapper/KDF, not an old local cache
+    // that may predate a master-password or KDF change.
+    let sync = fresh_sync(&config, &mut db)?;
+    let client = rbw::api::Client::new(
+        &config.base_url(),
+        &config.identity_url(),
+        &config.ui_url(),
+        config.client_cert_path(),
+    );
+    let (kdf, iterations, memory, parallelism) =
+        tokio::runtime::Runtime::new()?.block_on(client.prelogin(email))?;
     let identity = rbw::identity::Identity::new(
         email,
         &rbw::locked::Password::new(locked_password),
-        db.kdf.context("missing account KDF")?,
-        db.iterations.context("missing account KDF iterations")?,
-        db.memory,
-        db.parallelism,
+        kdf,
+        iterations,
+        memory,
+        parallelism,
     )?;
     // Authenticate the supplied password locally, even if the SSH agent is unlocked.
-    CipherString::new(
-        db.protected_key.as_deref().context("missing vault key")?,
-    )?
-    .decrypt_locked_symmetric(&identity.keys)
-    .context("master password is incorrect")?;
+    CipherString::new(required_str(&sync["profile"], "key")?)?
+        .decrypt_locked_symmetric(&identity.keys)
+        .context("master password is incorrect")?;
 
-    let sync = fresh_sync(&config, &mut db)?;
     let personal_keys = Keys::new(
         CipherString::new(required_str(&sync["profile"], "key")?)?
             .decrypt_locked_symmetric(&identity.keys)?,
