@@ -1170,6 +1170,30 @@ impl Client {
         Ok((sso_code, sso_code_verifier, callback_url))
     }
 
+    /// Preserve the complete sync response for lossless vault exports.
+    pub async fn sync_raw(
+        &self,
+        access_token: &str,
+    ) -> Result<serde_json::Value> {
+        let client = self.reqwest_client().await?;
+        let res = client
+            .get(self.api_url("/sync"))
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Bitwarden-Client-Version", "2024.12.0")
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest { source })?;
+        match res.status() {
+            reqwest::StatusCode::OK => res.json_with_path().await,
+            reqwest::StatusCode::UNAUTHORIZED => {
+                Err(Error::RequestUnauthorized)
+            }
+            _ => Err(Error::RequestFailed {
+                status: res.status().as_u16(),
+            }),
+        }
+    }
+
     pub async fn sync(
         &self,
         access_token: &str,

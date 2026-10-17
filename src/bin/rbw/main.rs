@@ -4,6 +4,7 @@ use anyhow::Context as _;
 use clap::{CommandFactory as _, Parser as _};
 
 mod actions;
+mod backup;
 mod commands;
 mod sock;
 
@@ -50,6 +51,32 @@ enum Opt {
 
     #[command(about = "Update the local copy of the Bitwarden database")]
     Sync,
+
+    #[command(
+        about = "Show logged-in account metadata as JSON without unlocking"
+    )]
+    Status,
+
+    #[command(
+        about = "Export a password-protected Bitwarden encrypted JSON backup"
+    )]
+    Export {
+        #[arg(
+            long,
+            required = true,
+            help = "Read the master password from stdin"
+        )]
+        password_stdin: bool,
+        #[arg(
+            long,
+            help = "Export this organization's accessible items instead of personal items"
+        )]
+        organizationid: Option<String>,
+        #[arg(long, help = "Abort if the configured account ID differs")]
+        expected_user_id: Option<String>,
+        #[arg(long, help = "Abort if the configured server URL differs")]
+        expected_server_url: Option<String>,
+    },
 
     #[command(
         about = "List all entries in the local Bitwarden database",
@@ -300,6 +327,8 @@ impl Opt {
             Self::Unlock => "unlock".to_string(),
             Self::Unlocked => "unlocked".to_string(),
             Self::Sync => "sync".to_string(),
+            Self::Status => "status".to_string(),
+            Self::Export { .. } => "export".to_string(),
             Self::List { .. } => "list".to_string(),
             Self::Get { .. } => "get".to_string(),
             Self::Search { .. } => "search".to_string(),
@@ -390,6 +419,17 @@ fn main() {
         Opt::Unlock => commands::unlock(),
         Opt::Unlocked => commands::unlocked(),
         Opt::Sync => commands::sync(),
+        Opt::Status => backup::status(),
+        Opt::Export {
+            password_stdin: _,
+            organizationid,
+            expected_user_id,
+            expected_server_url,
+        } => backup::export(
+            organizationid.as_deref(),
+            expected_user_id.as_deref(),
+            expected_server_url.as_deref(),
+        ),
         Opt::List { fields, raw } => commands::list(&fields, raw),
         Opt::Get {
             find_args,

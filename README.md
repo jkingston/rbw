@@ -1,5 +1,34 @@
 # rbw
 
+## Fork: encrypted backups
+
+This fork adds `rbw status` (account/server metadata only) and
+`rbw export --password-stdin`. Export requires an existing `rbw login`,
+validates the supplied master password, fetches a fresh full sync response,
+and writes only password-protected Bitwarden encrypted JSON to stdout.
+The export uses PBKDF2-SHA256 with 600,000 iterations, a fresh random salt,
+and authenticated AES-256-CBC, independently of the account encryption key.
+Personal items and all personal folders are exported by default;
+`--organizationid UUID` selects accessible items and collections in an
+organization. Attachments are metadata only; their file bodies and Sends
+are not exported.
+
+`--expected-user-id UUID --expected-server-url URL` makes a scheduled job
+abort if the configured account changes between prompting and exporting.
+Decryption failures abort the entire export. Raw sync JSON is retained
+rather than converting through rbw's reduced entry model, preserving
+passkeys, password history, custom fields, and additional item metadata.
+
+The macOS backup job at `~/bin/bitwarden-vault-backup` supplies the master
+password through stdin, writes to a private temporary file, and independently
+decrypts the export with `bitwarden-vault-backup-verify.js` before publishing it.
+The password is not placed in command arguments or environment variables.
+
+Install this fork with `cargo install --path . --locked --force --root ~/.local`.
+On macOS, `DEVELOPER_DIR=/Library/Developer/CommandLineTools` selects the
+standalone Command Line Tools. Both `rbw` and `rbw-agent` must come from the
+same build and `~/.local/bin` must precede Homebrew in PATH.
+
 This is an unofficial command line client for
 [Bitwarden](https://bitwarden.com/). Although Bitwarden does come with its own
 [command line client](https://help.bitwarden.com/article/cli/), it is

@@ -133,6 +133,20 @@ pub fn unlock<S: std::hash::BuildHasher>(
     Ok((key, org_keys))
 }
 
+pub async fn sync_raw(
+    access_token: &str,
+    refresh_token: &str,
+) -> Result<(Option<String>, serde_json::Value)> {
+    with_exchange_refresh_token_async(access_token, refresh_token, |token| {
+        let token = token.to_string();
+        Box::pin(async move {
+            let (client, _) = api_client_async().await?;
+            client.sync_raw(&token).await
+        })
+    })
+    .await
+}
+
 pub async fn sync(
     access_token: &str,
     refresh_token: &str,
