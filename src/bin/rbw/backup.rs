@@ -6,6 +6,15 @@ use zeroize::Zeroizing;
 
 use rbw::{cipherstring::CipherString, locked::Keys};
 
+fn server_url(config: &rbw::config::Config) -> String {
+    config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://bitwarden.com")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn account_id(db: &rbw::db::Db) -> anyhow::Result<String> {
     let token = db.access_token.as_deref().context("run rbw login first")?;
     let payload = token.split('.').nth(1).context("invalid access token")?;
@@ -36,7 +45,7 @@ pub fn status() -> anyhow::Result<()> {
     serde_json::to_writer(
         std::io::stdout(),
         &json!({
-            "status": state, "serverUrl": config.base_url(),
+        "status": state, "serverUrl": server_url(&config),
             "userEmail": config.email, "userId": id,
         }),
     )?;
@@ -183,7 +192,7 @@ pub fn export(
     let mut db = rbw::db::Db::load(&config.server_name(), email)?;
     let user_id = account_id(&db)?;
     if expected_user_id.is_some_and(|id| id != user_id)
-        || expected_server_url.is_some_and(|url| url != config.base_url())
+        || expected_server_url.is_some_and(|url| url != server_url(&config))
     {
         bail!("configured account changed since the backup prompt; retry");
     }
